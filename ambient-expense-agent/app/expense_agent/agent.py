@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -12,6 +13,21 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from .config import MODEL_NAME, THRESHOLD
+
+# Security Checkpoint Regex Patterns and Keywords
+SSN_REGEX = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+CC_REGEX = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
+INJECTION_KEYWORDS = [
+    "ignore",
+    "override",
+    "bypass",
+    "system message",
+    "system prompt",
+    "developer instructions",
+    "auto-approve",
+    "auto approve",
+    "force approve",
+]
 
 
 # Pydantic Schemas for validation and auto-conversion
@@ -113,6 +129,47 @@ def auto_approve(node_input: ExpenseReport) -> Event:
     return Event(output="approved", state={"decision": "approved"})
 
 
+@node
+def security_checkpoint(ctx: Context, node_input: ExpenseReport) -> Event:
+    """Scrubs sensitive personal data and checks for prompt injection attempts."""
+    description = node_input.description
+    redacted_categories = []
+
+    # 1. Scrub SSNs
+    if SSN_REGEX.search(description):
+        description = SSN_REGEX.sub("[REDACTED SSN]", description)
+        redacted_categories.append("SSN")
+
+    # 2. Scrub Credit Cards
+    if CC_REGEX.search(description):
+        description = CC_REGEX.sub("[REDACTED CREDIT CARD]", description)
+        redacted_categories.append("Credit Card")
+
+    # Update state with scrubbed description
+    scrubbed_expense = node_input.model_copy(update={"description": description})
+    state_updates = {"expense": scrubbed_expense.model_dump()}
+
+    if redacted_categories:
+        state_updates["redacted_categories"] = redacted_categories
+
+    # 3. Check for prompt injection
+    desc_lower = description.lower()
+    is_injection = any(keyword in desc_lower for keyword in INJECTION_KEYWORDS)
+
+    if is_injection:
+        state_updates["security_alert"] = True
+        assessment = {
+            "risk_level": "CRITICAL",
+            "risk_factors": ["Potential Prompt Injection Attack"],
+            "explanation": "The expense description contains text that matches prompt injection signatures trying to override system rules.",
+        }
+        # Route straight to human review, bypassing the LLM
+        return Event(output=assessment, route="injection_detected", state=state_updates)
+    else:
+        # Route to risk_reviewer (LLM)
+        return Event(output=scrubbed_expense, route="clean", state=state_updates)
+
+
 # LLM Risk Review Agent (using LlmAgent)
 risk_reviewer = LlmAgent(
     name="risk_reviewer",
@@ -133,11 +190,15 @@ async def get_human_decision(
 ) -> AsyncGenerator[Event | RequestInput, None]:
     """Alerts the human reviewer with LLM risk assessment, and pauses the workflow for human approval."""
     expense_dict = ctx.state.get("expense", {})
+    is_security_alert = ctx.state.get("security_alert", False)
+    redacted = ctx.state.get("redacted_categories", [])
 
     if not ctx.resume_inputs:
-        # Alert layout/message
+        prefix = "🚨 SECURITY ALERT & " if is_security_alert else "⚠️ "
+        redact_info = f" [Redacted: {', '.join(redacted)}]" if redacted else ""
+
         alert_msg = (
-            f"⚠️ ALERT: Expense of ${expense_dict.get('amount')} submitted by {expense_dict.get('submitter')} requires review.\n"
+            f"{prefix}ALERT: Expense of ${expense_dict.get('amount')} submitted by {expense_dict.get('submitter')} requires review.{redact_info}\n"
             f"Risk Level: {node_input.get('risk_level')}\n"
             f"Factors: {', '.join(node_input.get('risk_factors', []))}\n"
             f"Explanation: {node_input.get('explanation')}"
@@ -181,11 +242,20 @@ root_agent = Workflow(
     edges=[
         ("START", parse_input),
         # Branching based on route from parse_input
-        (parse_input, {"auto_approve": auto_approve, "llm_review": risk_reviewer}),
+        (
+            parse_input,
+            {"auto_approve": auto_approve, "llm_review": security_checkpoint},
+        ),
+        # Security Checkpoint routes to either LLM review or directly to human
+        (
+            security_checkpoint,
+            {"clean": risk_reviewer, "injection_detected": get_human_decision},
+        ),
         # Approve branch merges to record_outcome
         (auto_approve, record_outcome),
-        # Review branch goes to human, then merges to record_outcome
+        # Risk reviewer output goes to human decision
         (risk_reviewer, get_human_decision),
+        # Human decision merges to record_outcome
         (get_human_decision, record_outcome),
     ],
 )
