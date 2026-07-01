@@ -15,16 +15,26 @@
 
 import os
 import google.auth
+from dotenv import load_dotenv
 
-# Attempt to configure default GCP project credentials
-try:
-    _, project_id = google.auth.default()
-    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-except Exception:
-    pass
+# Load local environment variables
+load_dotenv()
 
-os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+# Determine backend based on the presence of GEMINI_API_KEY (AI Studio vs Vertex AI)
+if (
+    os.environ.get("GEMINI_API_KEY")
+    and os.environ.get("GEMINI_API_KEY") != "your-api-key-here"
+):
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
+else:
+    try:
+        _, project_id = google.auth.default()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+        os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+    except Exception:
+        # Fallback to AI Studio if no GCP credentials found
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
 
 from google.adk.apps import App
 from .expense_agent.agent import root_agent
