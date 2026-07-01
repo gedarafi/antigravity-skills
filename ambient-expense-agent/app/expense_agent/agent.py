@@ -53,23 +53,30 @@ class RiskAssessment(BaseModel):
 
 
 @node
-def parse_input(ctx: Context, node_input: Any) -> Event:
+async def parse_input(
+    ctx: Context, node_input: Any
+) -> AsyncGenerator[Event | RequestInput, None]:
     """Parses incoming Pub/Sub style message (either plain JSON or base64-encoded 'data' key)."""
     # If we already have the expense in state, preserve and pass it through
     if ctx.state and "expense" in ctx.state:
         expense = ExpenseReport(**ctx.state["expense"])
         route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
-        return Event(output=expense, route=route)
+        yield Event(output=expense, route=route)
+        return
 
-    raw_data = None
-    if isinstance(node_input, types.Content):
-        text = "".join(part.text for part in node_input.parts if part.text)
-        try:
-            raw_data = json.loads(text)
-        except Exception:
-            raw_data = text
+    # Check if we are resuming from the initial payload prompt
+    if ctx.resume_inputs and "initial_payload" in ctx.resume_inputs:
+        raw_data = ctx.resume_inputs["initial_payload"]
     else:
-        raw_data = node_input
+        raw_data = None
+        if isinstance(node_input, types.Content):
+            text = "".join(part.text for part in node_input.parts if part.text)
+            try:
+                raw_data = json.loads(text)
+            except Exception:
+                raw_data = text
+        else:
+            raw_data = node_input
 
     # Parse raw string format
     if isinstance(raw_data, str):
@@ -108,6 +115,14 @@ def parse_input(ctx: Context, node_input: Any) -> Event:
     else:
         parsed = {}
 
+    # Check if payload is empty/missing (typical for playground session startup)
+    if not parsed or (parsed.get("amount") is None and parsed.get("submitter") is None):
+        yield RequestInput(
+            interrupt_id="initial_payload",
+            message="Welcome! Please provide the expense report JSON payload to begin.",
+        )
+        return
+
     # Cast to Pydantic Model
     expense = ExpenseReport(
         amount=float(parsed.get("amount", 0)),
@@ -120,7 +135,7 @@ def parse_input(ctx: Context, node_input: Any) -> Event:
     # Route conditionally
     route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
 
-    return Event(output=expense, route=route, state={"expense": expense.model_dump()})
+    yield Event(output=expense, route=route, state={"expense": expense.model_dump()})
 
 
 @node
