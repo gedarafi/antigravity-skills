@@ -29,7 +29,7 @@ This skill ensures that all new source files have the correct copyright header.
 If the user asks to "create a python script for hello world", you should generate:
 
 ```python
-# Copyright (c) 2024 Google LLC
+# Copyright (c) 2026 MyCompany LLC
 # ... (rest of license text) ...
 
 def main():
