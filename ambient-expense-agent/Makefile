@@ -5,3 +5,6 @@ install:
 
 playground:
 	agents-cli playground
+
+run:
+	uv run python -m app.fast_api_app

@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import contextlib
+import json
+import logging
 import os
 from collections.abc import AsyncIterator
 
-import google.auth
 from a2a.server.tasks import InMemoryTaskStore
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from google.adk.cli.fast_api import get_fast_api_app
 from google.adk.runners import Runner
-from google.cloud import logging as google_cloud_logging
+from starlette.requests import Request
 
 from app.app_utils import services
 from app.app_utils.a2a import attach_a2a_routes
@@ -30,24 +31,15 @@ from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
 
 load_dotenv()
-setup_telemetry()
-try:
-    _, project_id = google.auth.default()
-except Exception:
-    project_id = None
 
-try:
-    logging_client = google_cloud_logging.Client()
-    logger = logging_client.logger(__name__)
-except Exception:
-    import logging
-
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-
-allow_origins = (
-    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
+# Initialize standard Python logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
+
+# Telemetry setup
+setup_telemetry()
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -75,9 +67,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
+allow_origins = (
+    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
+)
+
 app: FastAPI = get_fast_api_app(
     agents_dir=AGENT_DIR,
-    web=True,
+    web=False,
+    trigger_sources=["pubsub"],
     artifact_service_uri=services.ARTIFACT_SERVICE_URI,
     allow_origins=allow_origins,
     session_service_uri=services.SESSION_SERVICE_URI,
@@ -88,25 +85,30 @@ app.title = "ambient-expense-agent"
 app.description = "API for interacting with the Agent ambient-expense-agent"
 
 
+@app.middleware("http")
+async def normalize_pubsub_subscription(request: Request, call_next):
+    """Normalize projects/.../subscriptions/NAME to just NAME."""
+    if request.url.path.endswith("/trigger/pubsub") and request.method == "POST":
+        body = await request.body()
+        try:
+            data = json.loads(body)
+            sub = data.get("subscription", "")
+            if "/" in sub:
+                data["subscription"] = sub.rsplit("/", 1)[-1]
+                request._body = json.dumps(data).encode()
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return await call_next(request)
+
+
 @app.post("/feedback")
 def collect_feedback(feedback: Feedback) -> dict[str, str]:
-    """Collect and log feedback.
-
-    Args:
-        feedback: The feedback data to log
-
-    Returns:
-        Success message
-    """
-    if hasattr(logger, "log_struct"):
-        logger.log_struct(feedback.model_dump(), severity="INFO")
-    else:
-        logger.info(f"Feedback: {feedback.model_dump()}")
+    """Collect and log feedback."""
+    logger.info(f"Feedback: {feedback.model_dump()}")
     return {"status": "success"}
 
 
-# Main execution
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
