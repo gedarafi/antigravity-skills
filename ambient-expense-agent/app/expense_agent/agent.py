@@ -57,26 +57,17 @@ async def parse_input(
     ctx: Context, node_input: Any
 ) -> AsyncGenerator[Event | RequestInput, None]:
     """Parses incoming Pub/Sub style message (either plain JSON or base64-encoded 'data' key)."""
-    # If we already have the expense in state, preserve and pass it through
-    if ctx.state and "expense" in ctx.state:
-        expense = ExpenseReport(**ctx.state["expense"])
-        route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
-        yield Event(output=expense, route=route)
-        return
-
-    # Check if we are resuming from the initial payload prompt
-    if ctx.resume_inputs and "initial_payload" in ctx.resume_inputs:
-        raw_data = ctx.resume_inputs["initial_payload"]
+    # 1. Try to parse the current node_input
+    parsed = {}
+    raw_data = None
+    if isinstance(node_input, types.Content):
+        text = "".join(part.text for part in node_input.parts if part.text)
+        try:
+            raw_data = json.loads(text)
+        except Exception:
+            raw_data = text
     else:
-        raw_data = None
-        if isinstance(node_input, types.Content):
-            text = "".join(part.text for part in node_input.parts if part.text)
-            try:
-                raw_data = json.loads(text)
-            except Exception:
-                raw_data = text
-        else:
-            raw_data = node_input
+        raw_data = node_input
 
     # Parse raw string format
     if isinstance(raw_data, str):
@@ -109,33 +100,80 @@ async def parse_input(
             try:
                 parsed = json.loads(data_val)
             except Exception:
-                parsed = {}
+                pass
     elif isinstance(data_val, dict):
         parsed = data_val
-    else:
-        parsed = {}
 
-    # Check if payload is empty/missing (typical for playground session startup)
-    if not parsed or (parsed.get("amount") is None and parsed.get("submitter") is None):
-        yield RequestInput(
-            interrupt_id="initial_payload",
-            message="Welcome! Please provide the expense report JSON payload to begin.",
+    # 2. Check if this is a valid new expense report payload
+    is_valid_new_expense = (
+        isinstance(parsed, dict)
+        and parsed.get("amount") is not None
+        and parsed.get("submitter") is not None
+    )
+
+    if is_valid_new_expense:
+        # A brand new expense report has been submitted, reset state for this cycle
+        expense = ExpenseReport(
+            amount=float(parsed.get("amount", 0)),
+            submitter=str(parsed.get("submitter", "Unknown")),
+            category=str(parsed.get("category", "General")),
+            description=str(parsed.get("description", "")),
+            date=str(parsed.get("date", "")),
+        )
+        route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
+        yield Event(
+            output=expense,
+            route=route,
+            state={
+                "expense": expense.model_dump(),
+                "security_alert": False,
+                "redacted_categories": [],
+                "risk_assessment": None,
+                "decision": None,
+            },
         )
         return
 
-    # Cast to Pydantic Model
-    expense = ExpenseReport(
-        amount=float(parsed.get("amount", 0)),
-        submitter=str(parsed.get("submitter", "Unknown")),
-        category=str(parsed.get("category", "General")),
-        description=str(parsed.get("description", "")),
-        date=str(parsed.get("date", "")),
+    # 3. If not a new payload, check if we already have the expense in state (resumption)
+    if ctx.state and "expense" in ctx.state:
+        expense = ExpenseReport(**ctx.state["expense"])
+        route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
+        yield Event(output=expense, route=route)
+        return
+
+    # 4. Check if we are resuming from the initial payload prompt
+    if ctx.resume_inputs and "initial_payload" in ctx.resume_inputs:
+        resume_val = ctx.resume_inputs["initial_payload"]
+        try:
+            parsed_resume = (
+                json.loads(resume_val) if isinstance(resume_val, str) else resume_val
+            )
+            if (
+                isinstance(parsed_resume, dict)
+                and parsed_resume.get("amount") is not None
+            ):
+                expense = ExpenseReport(
+                    amount=float(parsed_resume.get("amount", 0)),
+                    submitter=str(parsed_resume.get("submitter", "Unknown")),
+                    category=str(parsed_resume.get("category", "General")),
+                    description=str(parsed_resume.get("description", "")),
+                    date=str(parsed_resume.get("date", "")),
+                )
+                route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
+                yield Event(
+                    output=expense,
+                    route=route,
+                    state={"expense": expense.model_dump()},
+                )
+                return
+        except Exception:
+            pass
+
+    # 5. Otherwise, request the initial payload
+    yield RequestInput(
+        interrupt_id="initial_payload",
+        message="Welcome! Please provide the expense report JSON payload to begin.",
     )
-
-    # Route conditionally
-    route = "auto_approve" if expense.amount < THRESHOLD else "llm_review"
-
-    yield Event(output=expense, route=route, state={"expense": expense.model_dump()})
 
 
 @node
