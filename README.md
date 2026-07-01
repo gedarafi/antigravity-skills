@@ -63,3 +63,7 @@ The `gemini-cli-skills/` directory contains the following example:
 ## License
 
 Apache 2.0
+
+## Note:
+
+This branch contains the first version of the code.
