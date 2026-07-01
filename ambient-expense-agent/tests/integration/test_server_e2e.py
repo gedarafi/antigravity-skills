@@ -143,7 +143,14 @@ def test_adk_run_sse(server_fixture: subprocess.Popen[str]) -> None:
         "app_name": "app",
         "user_id": user_id,
         "session_id": session_id,
-        "new_message": {"role": "user", "parts": [{"text": "Hi!"}]},
+        "new_message": {
+            "role": "user",
+            "parts": [
+                {
+                    "text": '{"amount": 50, "submitter": "Alice", "category": "Meals", "description": "Lunch with client", "date": "2026-07-01"}'
+                }
+            ],
+        },
         "streaming": True,
     }
     response = requests.post(
@@ -175,7 +182,13 @@ def test_a2a_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
     message = Message(
         message_id=f"msg-user-{uuid.uuid4()}",
         role=Role.user,
-        parts=[Part(root=TextPart(text="Hi!"))],
+        parts=[
+            Part(
+                root=TextPart(
+                    text='{"amount": 50, "submitter": "Alice", "category": "Meals", "description": "Lunch with client", "date": "2026-07-01"}'
+                )
+            )
+        ],
     )
     request = SendStreamingMessageRequest(
         id="test-req-001",

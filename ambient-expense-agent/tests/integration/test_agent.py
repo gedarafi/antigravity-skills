@@ -32,7 +32,12 @@ def test_agent_stream() -> None:
     runner = Runner(agent=root_agent, session_service=session_service, app_name="test")
 
     message = types.Content(
-        role="user", parts=[types.Part.from_text(text="Why is the sky blue?")]
+        role="user",
+        parts=[
+            types.Part.from_text(
+                text='{"amount": 50, "submitter": "Alice", "category": "Meals", "description": "Lunch with client", "date": "2026-07-01"}'
+            )
+        ],
     )
 
     events = list(
